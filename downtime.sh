@@ -8,7 +8,7 @@ function gettime()
 START=$(date +%s)
 PID=$$
 ES=0
-RETRY=100
+RETRY=30
 
 STEP1FILE="$TMPDIR/step1.$PID"
 STEP2FILE="$TMPDIR/step2.$PID"
@@ -82,7 +82,8 @@ if [ `cat $STEP2FILE | grep HTTP/1.1 | awk {'print $2'} | tail -n1` == "200" ];t
                 ES=1
             fi
             #echo "Debug: $RETRY"
-            sleep 5;
+            echo "INFO: The config stage hasn't been applied - next retry in 10 seconds ..."
+            sleep 10
             let "RETRY-=1";
             ;;
          esac
@@ -98,6 +99,6 @@ END=$(date +%s)
 
 echo "$(gettime) API request comleted in $(($END - $START)) seconds with status $ES."
 #clean the mess
-rm -f $STEP1FILE $STEP3FILE $STEP3FILE
+rm -f $STEP1FILE $STEP2FILE $STEP3FILE
 
 exit $ES

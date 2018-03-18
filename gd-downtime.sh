@@ -15,12 +15,17 @@ STEP2FILE="$TMPDIR/step2.$PID"
 STEP3FILE="$TMPDIR/step3.$PID"
 
 #TODO
-#Test that jq binary is available
 #Message in case that package exists
 #show json response only when debug is used
 #test validity of date of week and timerange
 #generation of config for global downtime
 #better parameters handling
+
+# jq is used within the script
+if ! [ -x "$(command -v jq)" ]; then
+    echo 'ERROR: jq(https://stedolan.github.io/jq) not found but required by downtime script.' >&2
+    exit 1
+fi
 
 declare -A DC2CLUSTER
 DC2CLUSTER["na"]="51"
@@ -73,11 +78,11 @@ CURLRT="$?"
 echo "$(gettime) Step 1 - Creating of config package:  $APICREATEPACKAGE --> $CURL1"
 
 if [ "$CURLRT" -gt 0 ]; then
-    echo "ERROR during contacting Icinga2 API - curl returned code $CURLRT - check https://curl.haxx.se/libcurl/c/libcurl-errors.html for details."
+    echo "ERROR during contacting Icinga2 API - curl returned code $CURLRT - check https://curl.haxx.se/libcurl/c/libcurl-errors.html for details." >&2
     exit 1
 elif [ "$CURL1" != "200" ]; then
-    echo "ERROR - check details below:"
-    cat $STEP1FILE
+    echo "ERROR - check details below:" >&2
+    cat $STEP1FILE >&2
     exit 1
 else
     tail -n1 $STEP1FILE | jq;echo ""
@@ -117,8 +122,8 @@ if [ $CURL2 == "200" ];then
         200)
             NOERR=`cat $STEP3FILE | grep error | wc -l`
             if [ $NOERR -gt 0 ]; then
-                echo "ERROR durring applying downtime configuration - check details below:"
-                grep -v "Negotiate" $STEP3FILE
+                echo "ERROR durring applying downtime configuration - check details below:" >&2
+                grep -v "Negotiate" $STEP3FILE >&2
                 ES=1
             else
                 cat $STEP3FILE | grep ScheduledDowntimes
@@ -142,8 +147,8 @@ if [ $CURL2 == "200" ];then
     done
 
 else
-    echo "ERROR during uploading configuration - check details below:"
-    grep -v "Negotiate" $STEP2FILE
+    echo "ERROR during uploading configuration - check details below:" >&2
+    grep -v "Negotiate" $STEP2FILE >&2
     ES=1
 fi
 

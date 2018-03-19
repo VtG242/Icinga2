@@ -4,6 +4,76 @@ function gettime()
 {
   date +"%Y-%m-%d %H:%M:%S"
 }
+function help()
+{
+    echo "Usage:"
+    echo "-d datacenter (na, eu1, ca1)"
+    echo "-t ticket"
+    echo "-r range in format start(HH:MM)-stop(HH-MM)"
+    echo "-w day in week as string"
+    echo "Example: $0 -c GD-1234 -d ca1 -w saturday -r 08:00-12:00"
+}
+function ispemptyexit()
+{
+    if [[ $1 = -* ]]; then
+        echo "ERROR: all given parameters MUST have value."
+        help
+        exit 1
+     fi
+}
+
+# jq is used within the script
+if ! [ -x "$(command -v jq)" ]; then
+    echo 'ERROR: jq(https://stedolan.github.io/jq) not found but required by downtime script.' >&2
+    exit 1
+fi
+
+# parameters required
+if [[ ! $@ =~ ^\-.+ ]]; then
+  help
+fi
+
+# params to vars
+while getopts ":d:r:t:w:" opt; do
+    case $opt in
+    d)
+        ispemptyexit $OPTARG
+        DC="$OPTARG"
+        ;;
+    r)
+        ispemptyexit $OPTARG
+        RANGE="$OPTARG"
+        ;;
+    t)
+        ispemptyexit $OPTARG
+        JIRA="$OPTARG"
+        ;;
+    w)
+        ispemptyexit $OPTARG
+        DAYINWEEK="$OPTARG"
+        ;;
+    \?)
+        echo "Invalid option: -$OPTARG" >&2
+        help
+        exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      help
+      exit 1
+      ;;
+  esac
+done
+
+# params values must be given
+for VARIABLE in "$DC" "$RANGE" "$JIRA" "$DAYINWEEK"
+do
+    if [ -z "$VARIABLE" ]; then
+        echo "ERROR - Mandatory parameters missing or are empty." >&2
+        help
+        exit 1
+    fi
+done
 
 START=$(date +%s)
 PID=$$
@@ -21,30 +91,12 @@ STEP3FILE="$TMPDIR/step3.$PID"
 #generation of config for global downtime
 #better parameters handling
 
-# jq is used within the script
-if ! [ -x "$(command -v jq)" ]; then
-    echo 'ERROR: jq(https://stedolan.github.io/jq) not found but required by downtime script.' >&2
-    exit 1
-fi
-
 declare -A DC2CLUSTER
 DC2CLUSTER["na"]="51"
 DC2CLUSTER["eu1"]="101"
 DC2CLUSTER["ca1"]="151"
 
-#test existence of input parameters
-if [ "$#" -ne 4 ]; then
-    echo "ERROR - not all required parameters given."
-    echo "Usage: $0 [datacenter] [dayinweek] [time range] [jira ticket]"
-    echo "Example: $0 ca1 saturday 08:00-12:00 GD-666"
-    exit 1
-fi
-
-DC="$1"
-DAYINWEEK="$2"
-RANGE="$3"
-JIRA="$4"
-
+# test if given cluster exists
 if [ -z ${DC2CLUSTER["$DC"]} ]; then
     echo "ERROR - given datacenter($DC) doesn't exist."
     exit 1

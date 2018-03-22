@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+#TODO
+#Message in case that package exists
+#show json response only when debug is used
+#test validity of date of week and timerange
+#generation of config for global downtime
+#better parameters handling
+#curl calls as function
+#handling error states for -l -u option
+#check that downtime is really set on some host and service using dummy objects
+
 function gettime()
 {
   date +"%Y-%m-%d %H:%M:%S"
@@ -7,16 +17,23 @@ function gettime()
 function help()
 {
     echo "Usage:"
+    echo ""
+    echo "Downtime set:"
     echo "-d datacenter (na, eu1, ca1)"
     echo "-t ticket"
     echo "-r range in format start(HH:MM)-stop(HH-MM)"
     echo "-w day in week as string"
-    echo "Example: $0 -c GD-1234 -d ca1 -w saturday -r 08:00-12:00"
+    echo "Example: $0 -t GD1234 -d ca1 -w saturday -r 08:00-12:00"
+    echo ""
+    echo "Downtime unset:"
+    echo "-l list of set downtimes"
+    echo "-u unset given downtime"
+    echo "Example: $0 -u na-down-GD1234"
 }
 function ispemptyexit()
 {
     if [[ $1 = -* ]]; then
-        echo "ERROR: all given parameters MUST have value."
+        echo "ERROR: all given parameters MUST have value." >&2
         help
         exit 1
      fi
@@ -31,14 +48,35 @@ fi
 # parameters required
 if [[ ! $@ =~ ^\-.+ ]]; then
   help
+  exit 1
 fi
 
+ICINGAHOST="https://icinga2-master01.na.intgdc.com:8443"
+START=$(date +%s)
+PID=$$
+ES=0
+RETRY=30
+
 # params to vars
-while getopts ":d:r:t:w:" opt; do
+while getopts ":d:lr:t:u:w:" opt; do
     case $opt in
     d)
         ispemptyexit $OPTARG
         DC="$OPTARG"
+        ;;
+    l)
+        #list package
+        STEP0FILE="$TMPDIR/step0.$PID"
+        CURL0=`curl --silent --output $STEP0FILE \
+        --write-out "%{http_code}" \
+        -u : --negotiate \
+        --include -H "Accept: application/json" \
+        "${ICINGAHOST}/v1/config/packages"`
+        CURLRT="$?"
+        echo "List of downtime packages:"
+        tail -n1 $STEP0FILE | jq '.results[] | .name' | grep -v "^\"_" | grep "down-"
+        rm -f $STEP0FILE
+        exit 0
         ;;
     r)
         ispemptyexit $OPTARG
@@ -47,6 +85,21 @@ while getopts ":d:r:t:w:" opt; do
     t)
         ispemptyexit $OPTARG
         JIRA="$OPTARG"
+        ;;
+    u)
+        ispemptyexit $OPTARG
+        PKG2DEL="$OPTARG"
+        #delete package
+        STEP0FILE="$TMPDIR/step0.$PID"
+        CURL0=`curl --silent --output $STEP0FILE \
+        --write-out "%{http_code}" \
+        -u : --negotiate \
+        --include -H "Accept: application/json" \
+        --request DELETE "${ICINGAHOST}/v1/config/packages/${PKG2DEL}"`
+        CURLRT="$?"
+        tail -n1 $STEP0FILE | jq
+        rm -f $STEP0FILE
+        exit 0
         ;;
     w)
         ispemptyexit $OPTARG
@@ -75,21 +128,9 @@ do
     fi
 done
 
-START=$(date +%s)
-PID=$$
-ES=0
-RETRY=30
-
 STEP1FILE="$TMPDIR/step1.$PID"
 STEP2FILE="$TMPDIR/step2.$PID"
 STEP3FILE="$TMPDIR/step3.$PID"
-
-#TODO
-#Message in case that package exists
-#show json response only when debug is used
-#test validity of date of week and timerange
-#generation of config for global downtime
-#better parameters handling
 
 declare -A DC2CLUSTER
 DC2CLUSTER["na"]="51"
@@ -98,24 +139,24 @@ DC2CLUSTER["ca1"]="151"
 
 # test if given cluster exists
 if [ -z ${DC2CLUSTER["$DC"]} ]; then
-    echo "ERROR - given datacenter($DC) doesn't exist."
+    echo "ERROR - given datacenter(${DC}) doesn't exist."
     exit 1
 fi
 
 COMMENT="Platform maintenance - $JIRA"
-ICINGAHOST="https://icinga2-master01.na.intgdc.com:8443"
-ICINGAPKG="$DC-downtime"
+ICINGAPKG="${DC}-down-${JIRA}"
 APICREATEPACKAGE="/v1/config/packages/$ICINGAPKG"
 APIUPLOADCONF="/v1/config/stages/$ICINGAPKG"
 APISTAGELOG="/v1/config/files/$ICINGAPKG"
+
 #main downtime configuration
-CONFFILE='zones.d/'"$DC"'/'"$DC"'-downtime.conf'
+CONFFILE='zones.d/'"$DC"'/'"$DC"'-down-'"$JIRA"'.conf'
 #on the basics of parameters a particular API command is constructed
 case $DC in
 "global")
     ;;
 *)
-    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-downtime\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-downtime\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}'
+    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-down-'"$JIRA"'\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}'
     APIUPLOADCONFDATA='{ "files": { "'"$CONFFILE"'" : "'"$CONFDEF"'"}}'
     ;;
 esac
@@ -168,7 +209,7 @@ if [ $CURL2 == "200" ];then
             "$ICINGAHOST$APISTAGELOG/$STAGE/startup.log"`
         CURLRT="$?"
 
-        echo "$(gettime) Step 3 - Configuration package stage details:  $APISTAGELOG/$STAGE/startup.log --> "
+        echo "$(gettime) Step 3 - Configuration package stage details:  $APISTAGELOG/$STAGE/startup.log --> $CURL3"
 
         case "$CURL3" in
         200)

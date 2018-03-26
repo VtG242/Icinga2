@@ -3,12 +3,8 @@
 #TODO
 #Message in case that package exists
 #show json response only when debug is used
-#test validity of date of week and timerange
 #generation of config for global downtime
-#better parameters handling
-#curl calls as function
-#handling error states for -l -u option
-#check that downtime is really set on some host and service using dummy objects
+#check that downtime is really set on some host and service
 
 function gettime()
 {
@@ -16,14 +12,18 @@ function gettime()
 }
 function help()
 {
+    echo "Kerberos is used for authentication to Icinga2 API - run kinit before use"
+    echo ""
     echo "Usage:"
     echo ""
     echo "Downtime set:"
     echo "-d datacenter (na, eu1, ca1)"
     echo "-t ticket"
-    echo "-r range in format start(HH:MM)-stop(HH-MM)"
-    echo "-w day in week as string"
-    echo "Example: $0 -t GD1234 -d ca1 -w saturday -r 08:00-12:00"
+    echo "-w date in format YYYY-MM-DD"
+    echo "-r range in format start(HH:MM)-stop(HH-MM) - multiple ranges has to be delimited by coma (see examples)"
+    echo "Examples:"
+    echo "$0 -t GD1234 -d ca1 -w 2018-03-01 -r 08:00-12:00"
+    echo "$0 -t GD1235 -d eu1 -w 2018-12-24 -r 08:00-12:00,16:00-18:00"
     echo ""
     echo "Downtime unset:"
     echo "-l list of set downtimes"
@@ -37,6 +37,24 @@ function ispemptyexit()
         help
         exit 1
      fi
+}
+# processing of curl response for step1 commands
+function curl_response()
+{
+    CURLRT="$?"
+    CURLOUT=$1
+    echo ${CURLOUT}
+    if [ "$CURLRT" -gt 0 ]; then
+        echo "ERROR during contacting Icinga2 API - curl returned code $CURLRT - check https://curl.haxx.se/libcurl/c/libcurl-errors.html for details." >&2
+        exit 1
+    fi
+    if [ "$CURLOUT" != "200" ]; then
+        echo "ERROR - check details below:" >&2
+        # strip base auth string for case it will be run from systems which perform logging of output
+        grep -v "Negotiate" $STEP1FILE >&2
+        rm -f $STEP1FILE
+        exit 1
+    fi
 }
 
 # jq is used within the script
@@ -57,6 +75,15 @@ PID=$$
 ES=0
 RETRY=30
 
+STEP1FILE="$TMPDIR/step1.$PID"
+STEP2FILE="$TMPDIR/step2.$PID"
+STEP3FILE="$TMPDIR/step3.$PID"
+
+declare -A DC2CLUSTER
+DC2CLUSTER["na"]="51"
+DC2CLUSTER["eu1"]="101"
+DC2CLUSTER["ca1"]="151"
+
 # params to vars
 while getopts ":d:lr:t:u:w:" opt; do
     case $opt in
@@ -66,16 +93,11 @@ while getopts ":d:lr:t:u:w:" opt; do
         ;;
     l)
         #list package
-        STEP0FILE="$TMPDIR/step0.$PID"
-        CURL0=`curl --silent --output $STEP0FILE \
-        --write-out "%{http_code}" \
-        -u : --negotiate \
-        --include -H "Accept: application/json" \
-        "${ICINGAHOST}/v1/config/packages"`
-        CURLRT="$?"
-        echo "List of downtime packages:"
-        tail -n1 $STEP0FILE | jq '.results[] | .name' | grep -v "^\"_" | grep "down-"
-        rm -f $STEP0FILE
+        APILISTPKGS="/v1/config/packages"
+        echo -n "$(gettime) List of downtime packages: ${APILISTPKGS} --> "
+        curl_response $(curl -s -o $STEP1FILE --write-out "%{http_code}" -u : --negotiate -i -H "Accept: application/json" "${ICINGAHOST}${APILISTPKGS}")
+        tail -n1 $STEP1FILE | jq '.results[] | .name' | grep -v "^\"_" | grep "down-"
+        rm -f $STEP1FILE
         exit 0
         ;;
     r)
@@ -88,22 +110,27 @@ while getopts ":d:lr:t:u:w:" opt; do
         ;;
     u)
         ispemptyexit $OPTARG
-        PKG2DEL="$OPTARG"
+        APIPKGDEL="/v1/config/packages/${OPTARG}"
         #delete package
-        STEP0FILE="$TMPDIR/step0.$PID"
-        CURL0=`curl --silent --output $STEP0FILE \
-        --write-out "%{http_code}" \
-        -u : --negotiate \
-        --include -H "Accept: application/json" \
-        --request DELETE "${ICINGAHOST}/v1/config/packages/${PKG2DEL}"`
-        CURLRT="$?"
-        tail -n1 $STEP0FILE | jq
-        rm -f $STEP0FILE
+        echo -n "$(gettime) Delete downtime package: ${APIPKGDEL} --> "
+        curl_response $(curl -s -o $STEP1FILE --write-out "%{http_code}" -u : --negotiate -i -H "Accept: application/json" --request DELETE "${ICINGAHOST}${APIPKGDEL}")
+        tail -n1 $STEP1FILE | jq
+        rm -f $STEP1FILE
         exit 0
         ;;
     w)
         ispemptyexit $OPTARG
-        DAYINWEEK="$OPTARG"
+        if [[ $OPTARG =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            date -d "$OPTARG" +"%Y-%m-%d" > /dev/null 2>&1
+            if [ "$?" -gt 0 ]; then
+                echo "Ivalid date: -w ${OPTARG}" >&2
+                exit 1
+            fi
+        else
+            echo "Ivalid date format: -w ${OPTARG}" >&2
+            exit 1
+        fi
+        DAY="$OPTARG"
         ;;
     \?)
         echo "Invalid option: -$OPTARG" >&2
@@ -119,7 +146,7 @@ while getopts ":d:lr:t:u:w:" opt; do
 done
 
 # params values must be given
-for VARIABLE in "$DC" "$RANGE" "$JIRA" "$DAYINWEEK"
+for VARIABLE in "$DC" "$RANGE" "$JIRA" "$DAY"
 do
     if [ -z "$VARIABLE" ]; then
         echo "ERROR - Mandatory parameters missing or are empty." >&2
@@ -128,22 +155,13 @@ do
     fi
 done
 
-STEP1FILE="$TMPDIR/step1.$PID"
-STEP2FILE="$TMPDIR/step2.$PID"
-STEP3FILE="$TMPDIR/step3.$PID"
-
-declare -A DC2CLUSTER
-DC2CLUSTER["na"]="51"
-DC2CLUSTER["eu1"]="101"
-DC2CLUSTER["ca1"]="151"
-
 # test if given cluster exists
 if [ -z ${DC2CLUSTER["$DC"]} ]; then
     echo "ERROR - given datacenter(${DC}) doesn't exist."
     exit 1
 fi
 
-COMMENT="Platform maintenance - $JIRA"
+COMMENT="Platform maintenance $JIRA"
 ICINGAPKG="${DC}-down-${JIRA}"
 APICREATEPACKAGE="/v1/config/packages/$ICINGAPKG"
 APIUPLOADCONF="/v1/config/stages/$ICINGAPKG"
@@ -156,30 +174,14 @@ case $DC in
 "global")
     ;;
 *)
-    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-down-'"$JIRA"'\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={'"$DAYINWEEK"'=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}'
+    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-down-'"$JIRA"'\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}'
     APIUPLOADCONFDATA='{ "files": { "'"$CONFFILE"'" : "'"$CONFDEF"'"}}'
     ;;
 esac
 
-CURL1=`curl --silent --output $STEP1FILE \
-    --write-out "%{http_code}" \
-    -u : --negotiate \
-    --include -H "Accept: application/json" \
-    --request POST "$ICINGAHOST$APICREATEPACKAGE"`
-CURLRT="$?"
-
-echo "$(gettime) Step 1 - Creating of config package:  $APICREATEPACKAGE --> $CURL1"
-
-if [ "$CURLRT" -gt 0 ]; then
-    echo "ERROR during contacting Icinga2 API - curl returned code $CURLRT - check https://curl.haxx.se/libcurl/c/libcurl-errors.html for details." >&2
-    exit 1
-elif [ "$CURL1" != "200" ]; then
-    echo "ERROR - check details below:" >&2
-    cat $STEP1FILE >&2
-    exit 1
-else
-    tail -n1 $STEP1FILE | jq;echo ""
-fi
+echo -n "$(gettime) Step 1 - Creating of downtime config package: ${APICREATEPACKAGE} --> "
+curl_response $(curl -s -o $STEP1FILE --write-out "%{http_code}" -u : --negotiate -i -H "Accept: application/json" --request POST "${ICINGAHOST}${APICREATEPACKAGE}")
+tail -n1 $STEP1FILE | jq;echo ""
 
 CURL2=`curl --silent --output $STEP2FILE \
     --write-out "%{http_code}\n" \

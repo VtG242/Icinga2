@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
 #TODO
-#Message in case that package exists
 #show json response only when debug is used
 #generation of config for global downtime
 #check that downtime is really set on some host and service
@@ -12,23 +11,30 @@ function gettime()
 }
 function help()
 {
+    echo ""
     echo "Kerberos is used for authentication to Icinga2 API - run kinit before use"
     echo ""
     echo "Usage:"
     echo ""
     echo "Downtime set:"
     echo "-d datacenter (na, eu1, ca1)"
-    echo "-t ticket"
+    echo "-s icinga service (cpu-stats, ntp-offset) - in case that -d isn't specified it will be set for all hosts across DCs"
+    echo "-t ticket (JIRA,PD,ZENDESK)"
     echo "-w date in format YYYY-MM-DD"
     echo "-r range in format start(HH:MM)-stop(HH-MM) - multiple ranges has to be delimited by coma (see examples)"
     echo "Examples:"
     echo "$0 -t GD1234 -d ca1 -w 2018-03-01 -r 08:00-12:00"
     echo "$0 -t GD1235 -d eu1 -w 2018-12-24 -r 08:00-12:00,16:00-18:00"
+    echo "$0 -t GD1234 -s ntp-offset -w 2018-03-01 -r 08:00-12:00"
+    echo "$0 -t GD1234 -d na -s ntp-offset -w 2018-03-01 -r 08:00-12:00"
+    echo ""
+    echo "In case that creation of package failed it is possible that package already exists so delete such existing package first."
     echo ""
     echo "Downtime unset:"
-    echo "-l list of set downtimes"
-    echo "-u unset given downtime"
-    echo "Example: $0 -u na-down-GD1234"
+    echo "-l list of set downtimes (icinga config packages)"
+    echo "-u unset downtime package retrieved by -l"
+    echo "Example:"
+    echo "$0 -u na-down-GD1234"
 }
 function ispemptyexit()
 {
@@ -85,10 +91,15 @@ DC2CLUSTER["eu1"]="101"
 DC2CLUSTER["ca1"]="151"
 
 # params to vars
-while getopts ":d:lr:t:u:w:" opt; do
+while getopts ":d:lr:s:t:u:w:" opt; do
     case $opt in
     d)
         ispemptyexit $OPTARG
+        # DC must to have set a relevant hostgroup in DC2CLUSTER
+        if [ -z ${DC2CLUSTER["$OPTARG"]} ]; then
+            echo "ERROR - datacenter $OPTARG doesn't exist." >&2
+            exit 1
+        fi
         DC="$OPTARG"
         ;;
     l)
@@ -103,6 +114,10 @@ while getopts ":d:lr:t:u:w:" opt; do
     r)
         ispemptyexit $OPTARG
         RANGE="$OPTARG"
+        ;;
+    s)  ispemptyexit $OPTARG
+        SRVC="$OPTARG"
+        ACTION="service-downtime"
         ;;
     t)
         ispemptyexit $OPTARG
@@ -145,39 +160,69 @@ while getopts ":d:lr:t:u:w:" opt; do
   esac
 done
 
-# params values must be given
-for VARIABLE in "$DC" "$RANGE" "$JIRA" "$DAY"
+# quick and ugly - creation of DCKEY for DC2CLUSTER because in case that -s is used -d can be omitted
+if [ -z $DC ]; then
+    DCKEY="n/a"
+else
+    DCKEY="${DC}"
+fi
+
+if [ -z ${DC2CLUSTER["$DCKEY"]} ] && [ ACTION != "service-downtime" ]; then
+    echo "ERROR - datacenter specification is missing." >&2
+    help
+    exit 1
+fi
+
+# params which must be given
+for VARIABLE in "$RANGE" "$JIRA" "$DAY"
 do
     if [ -z "$VARIABLE" ]; then
-        echo "ERROR - Mandatory parameters missing or are empty." >&2
+        echo "ERROR - Mandatory parameters missing or specified incorrectly." >&2
         help
         exit 1
     fi
 done
 
-# test if given cluster exists
-if [ -z ${DC2CLUSTER["$DC"]} ]; then
-    echo "ERROR - given datacenter(${DC}) doesn't exist."
-    exit 1
-fi
+#on the basics of action and parameters a particular API command is constructed
+case $ACTION in
+"global-downtime")
+    CONFFILE='zones.d/global/global-down-'"$JIRA"'.conf'
+    exit
+    ;;
+"service-downtime")
+    if [ -z ${DC2CLUSTER["$DCKEY"]} ];then
+        #downtime for all hosts
+        ICINGAPKG="service-down-${JIRA}"
+        COMMENT="Global service maintenance $JIRA"
+        CONFFILE='zones.d/global/service-down-'"$JIRA"'.conf'
+        CONFDEF='apply ScheduledDowntime \"service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where service.name == \"'"${SRVC}"'\" }'
+    else
+        #downtime for service in specific DC
+        ICINGAPKG="${DC}-service-down-${JIRA}"
+        COMMENT="$DC service maintenance $JIRA"
+        CONFFILE='zones.d/'"$DC"'/service-down-'"$JIRA"'.conf'
+        CONFDEF='apply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where service.name == \"'"${SRVC}"'\" && \"Cluster '"${DC2CLUSTER[$DCKEY]}"'\" in host.groups }'
+    fi
+    APIUPLOADCONFDATA='{ "files": { "'"$CONFFILE"'" : "'"$CONFDEF"'"}}'
+    ;;
+*)
+    #main downtime configuration
+    ICINGAPKG="${DC}-down-${JIRA}"
+    COMMENT="Platform maintenance $JIRA"
+    CONFFILE='zones.d/'"$DC"'/'"$DC"'-down-'"$JIRA"'.conf'
+    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-down-'"$JIRA"'\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DCKEY]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DCKEY]}"'\" in host.groups}'
+    APIUPLOADCONFDATA='{ "files": { "'"$CONFFILE"'" : "'"$CONFDEF"'"}}'
+    ;;
+esac
 
-COMMENT="Platform maintenance $JIRA"
-ICINGAPKG="${DC}-down-${JIRA}"
 APICREATEPACKAGE="/v1/config/packages/$ICINGAPKG"
 APIUPLOADCONF="/v1/config/stages/$ICINGAPKG"
 APISTAGELOG="/v1/config/files/$ICINGAPKG"
 
-#main downtime configuration
-CONFFILE='zones.d/'"$DC"'/'"$DC"'-down-'"$JIRA"'.conf'
-#on the basics of parameters a particular API command is constructed
-case $DC in
-"global")
-    ;;
-*)
-    CONFDEF='apply ScheduledDowntime \"'"$DC"'-host-down-'"$JIRA"'\" to Host {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}\napply ScheduledDowntime \"'"$DC"'-service-down-'"$JIRA"'\" to Service {author=\"'"$USER"'\", comment=\"'"$COMMENT"'\", ranges={\"'"$DAY"'\"=\"'"$RANGE"'\"}, assign where \"Cluster '"${DC2CLUSTER[$DC]}"'\" in host.groups}'
-    APIUPLOADCONFDATA='{ "files": { "'"$CONFFILE"'" : "'"$CONFDEF"'"}}'
-    ;;
-esac
+#DEBUG
+#echo "PKG: $ICINGAPKG"
+#echo $APIUPLOADCONFDATA
+#exit
 
 echo -n "$(gettime) Step 1 - Creating of downtime config package: ${APICREATEPACKAGE} --> "
 curl_response $(curl -s -o $STEP1FILE --write-out "%{http_code}" -u : --negotiate -i -H "Accept: application/json" --request POST "${ICINGAHOST}${APICREATEPACKAGE}")
@@ -229,7 +274,7 @@ if [ $CURL2 == "200" ];then
             ;;
         *)
             if [ $RETRY == "0" ]; then
-                echo "A numer of max attempts to get a state of stage reached ... give it up."
+                echo "A numer of max attempts to get a state of stage reached ... give it up." >&2
                 break;
                 ES=1
             fi
